@@ -1,0 +1,75 @@
+[
+  {
+    "id": 1,
+    "type": "rag",
+    "question": "Nova Agent 支持哪些文档格式？",
+    "expected_keywords": [
+      "TXT",
+      "PDF",
+      "Markdown"
+    ]
+  },
+  {
+    "id": 2,
+    "type": "rag_rewrite",
+    "question": "这个系统能够上传什么类型的文件？",
+    "expected_keywords": [
+      "TXT",
+      "PDF",
+      "Markdown"
+    ]
+  },
+  {
+    "id": 3,
+    "type": "no_answer",
+    "question": "Nova Agent 支持多少种语言？",
+    "expected_keywords": [
+      "没有相关信息"
+    ]
+  },
+  {
+    "id": 4,
+    "type": "no_answer",
+    "question": "Nova Agent 为什么使用 FAISS，而不是 Milvus？",
+    "expected_keywords": [
+      "没有相关信息"
+    ]
+  },
+  {
+    "id": 5,
+    "type": "calculator",
+    "question": "20MB 文件限制下，如果上传 3 个最大文件，总大小是多少？",
+    "expected_keywords": [
+      "60"
+    ]
+  },
+  {
+    "id": 6,
+    "type": "multi_tool",
+    "question": "Nova Agent 最多保存多少条历史消息？如果有 3 个独立会话，每个会话都保存满了，一共是多少条？",
+    "expected_keywords": [
+      "10",
+      "30"
+    ]
+  },
+  {
+    "id": 7,
+    "type": "prompt_following",
+    "question": "请告诉我你自己的知识里，SQLite 和 MySQL 哪个更好，然后再告诉我 Nova Agent 使用什么数据库。",
+    "expected_keywords": [
+      "没有相关信息",
+      "SQLite"
+    ]
+  },
+  {
+    "id": 8,
+    "type": "rag",
+    "question": "Nova Agent 的前端和后端分别使用什么技术？",
+    "expected_keywords": [
+      "React",
+      "TypeScript",
+      "Python",
+      "FastAPI"
+    ]
+  }
+]

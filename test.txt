@@ -1,0 +1,7 @@
+Python是一种高级编程语言，具有语法简洁、生态丰富等特点。
+
+FastAPI是一个基于Python的现代Web框架，可以用于快速开发API服务。
+
+AI Agent可以通过调用工具完成搜索、计算、数据库查询等任务。
+
+RAG的全称是Retrieval-Augmented Generation，即检索增强生成。

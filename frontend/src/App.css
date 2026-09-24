@@ -1,0 +1,390 @@
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  background: #f5f7fa;
+}
+
+button,
+textarea {
+  font-family: inherit;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 左侧边栏 */
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: #ffffff;
+  border-right: 1px solid #e5e7eb;
+  padding: 20px 16px;
+  position: relative;
+  z-index: 100;
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 32px;
+}
+
+.sidebar-section {
+  margin-bottom: 28px;
+}
+
+.section-title {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+
+.new-button {
+  width: 100%;
+  border: 1px dashed #cbd5e1;
+  background: #ffffff;
+  padding: 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.new-button:hover {
+  background: #f8fafc;
+}
+
+.knowledge-item,
+.conversation-item {
+  padding: 9px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.knowledge-item:hover,
+.conversation-item:hover {
+  background: #f3f4f6;
+}
+
+.knowledge-item.active,
+.conversation-item.active {
+  background: #eef2ff;
+  color: #4f46e5;
+  font-weight: 500;
+}
+
+.knowledge-base-item {
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.knowledge-base-item:hover {
+  background: #f3f4f6;
+}
+
+.knowledge-base-item.active {
+  background: #e5e7eb;
+}
+
+
+
+/* 聊天区域 */
+
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-header {
+  height: 70px;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+}
+
+.chat-header h1 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.chat-header span {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+/* 消息区域 */
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 40px;
+}
+
+.welcome-message {
+  max-width: 600px;
+  margin: 120px auto;
+  text-align: center;
+}
+
+.welcome-message h2 {
+  font-size: 26px;
+  margin-bottom: 12px;
+}
+
+.welcome-message p {
+  color: #6b7280;
+  line-height: 1.7;
+}
+
+/* 输入区域 */
+
+.input-area {
+  padding: 20px 40px 28px;
+  background: #f5f7fa;
+}
+
+.input-box {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.input-box textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  font-size: 15px;
+  line-height: 1.5;
+  min-height: 24px;
+}
+
+.send-button {
+  border: none;
+  background: #4f46e5;
+  color: #ffffff;
+  padding: 9px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.send-button:hover {
+  background: #4338ca;
+}
+
+/* 登录页面 */
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #f5f7fa;
+}
+
+.login-card {
+  width: 360px;
+  background: #ffffff;
+  padding: 36px;
+  border-radius: 12px;
+  box-shadow:
+    0 8px 30px rgba(0, 0, 0, 0.08);
+}
+
+.login-card h1 {
+  margin: 0;
+  text-align: center;
+  font-size: 26px;
+}
+
+.login-subtitle {
+  text-align: center;
+  color: #6b7280;
+  margin: 10px 0 28px;
+}
+
+.login-card input {
+  width: 100%;
+  padding: 11px 12px;
+  margin-bottom: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  font-size: 14px;
+}
+
+.login-card input:focus {
+  border-color: #4f46e5;
+}
+
+.login-card button {
+  width: 100%;
+  padding: 11px;
+  border: none;
+  border-radius: 6px;
+  background: #4f46e5;
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.login-card button:hover {
+  background: #4338ca;
+}
+
+.login-error {
+  color: #dc2626;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.knowledge-base-item {
+  position: relative;
+  z-index: 9999;
+  cursor: pointer;
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+}
+
+.knowledge-base-item:hover {
+  background: #f3f4f6;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.username {
+  font-size: 14px;
+  color: #666;
+}
+
+.logout-button {
+  padding: 7px 14px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+
+.logout-button:hover {
+  background: #f5f5f5;
+}
+
+.knowledge-base-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.delete-button {
+  display: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.knowledge-base-item:hover .delete-button {
+  display: block;
+}
+
+.document-panel {
+  padding: 15px 20px;
+  border-bottom: 1px solid #eee;
+  background: #fafafa;
+}
+
+.document-title {
+  font-size: 14px;
+  font-weight: bold;
+  margin-bottom: 10px;
+}
+
+.document-empty {
+  font-size: 13px;
+  color: #999;
+}
+
+.document-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.document-item {
+  padding: 6px 10px;
+  background: white;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.document-upload {
+  margin-bottom: 10px;
+}
+
+.upload-button {
+  display: inline-block;
+  padding: 6px 12px;
+  background: #1677ff;
+  color: white;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.upload-button:hover {
+  opacity: 0.85;
+}
+.document-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: white;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.delete-document-button {
+  border: none;
+  background: transparent;
+  color: #ff4d4f;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.delete-document-button:hover {
+  text-decoration: underline;
+}
