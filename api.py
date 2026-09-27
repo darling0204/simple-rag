@@ -46,8 +46,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
+        "http://134.175.20.148",       # 允许你的公网 IP 访问
+        "http://localhost:5173",       # 保留本地测试
         "http://127.0.0.1:5173",
+        "*"                             # 或者直接设为 "*" 允许所有来源（测试阶段最方便）
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -294,6 +296,69 @@ def chat(
     "message": request.message,
     "answer": answer
 }
+
+
+# =========================
+# 用户注册
+# =========================
+
+@app.post("/register")
+def register(
+    request: UserCreate,
+    db: Session = Depends(get_db)
+):
+    # 基础校验
+    username = request.username.strip()
+    password = request.password
+
+    if len(username) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="用户名至少需要 3 个字符"
+        )
+
+    if len(password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="密码至少需要 6 个字符"
+        )
+
+    # 检查用户名是否已经存在
+    existing_user = db.query(User).filter(
+        User.username == username
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail="用户名已存在"
+        )
+
+    # 密码哈希后再保存
+    hashed_password = pwd_context.hash(password)
+
+    user = User(
+        username=username,
+        password=hashed_password
+    )
+
+    db.add(user)
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="注册失败，请稍后重试"
+        )
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        "message": "注册成功"
+    }
 
 
 # =========================

@@ -1,6 +1,47 @@
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
+
+// =========================
+// 注册
+// =========================
+
+export async function register(
+  username: string,
+  password: string
+) {
+  const response = await fetch(
+    `${API_BASE_URL}/register`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        username,
+        password,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.log("注册失败：", errorText);
+
+    let message = "注册失败";
+    try {
+      const data = JSON.parse(errorText);
+      message = data.detail || data.message || message;
+    } catch {
+      // 保留默认错误信息
+    }
+
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
 // =========================
 // 登录
 // =========================

@@ -1,6 +1,8 @@
 import json
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 from openai import OpenAI
 
 from rag import (
@@ -84,7 +86,46 @@ TOOLS = [
 
 
 # =========================
-# 3. Agent
+# 3. 工具执行器
+# =========================
+
+def execute_tool(
+    function_name,
+    arguments,
+    model,
+    index,
+    chunks
+):
+    """
+    根据 Agent 决定调用的工具，
+    执行对应的 Python 函数，
+    并返回工具结果。
+    """
+
+    if function_name == "search_knowledge":
+
+        results = search_knowledge(
+            arguments["query"],
+            model,
+            index,
+            chunks
+        )
+
+        return "\n\n".join(results)
+
+    elif function_name == "calculator":
+
+        return calculator(
+            arguments["expression"]
+        )
+
+    else:
+
+        return f"未知工具：{function_name}"
+
+
+# =========================
+# 4. Agent
 # =========================
 
 def agent(
@@ -101,50 +142,63 @@ def agent(
         {
             "role": "system",
             "content": """
-    你是一个 AI Agent。
+你是一个 AI Agent。
 
-    你可以使用以下工具：
+你可以使用以下工具：
 
-    1. search_knowledge：
-    搜索当前用户指定的本地知识库。
+1. search_knowledge：
+搜索当前用户指定的本地知识库。
 
-    2. calculator：
-    计算数学表达式。
+2. calculator：
+计算数学表达式。
 
-    请遵守以下规则：
+请遵守以下规则：
 
-    【知识库问答规则】
-    1. 当用户询问知识、概念、定义、说明或知识库相关内容时，
-    必须优先调用 search_knowledge。
+【知识库问答规则】
 
-    2. search_knowledge 返回的内容是当前知识库提供的唯一事实来源。
+1. 当用户询问知识、概念、定义、说明或知识库相关内容时，
+必须优先调用 search_knowledge。
 
-    3. 对于知识库问题，只能根据 search_knowledge 返回的内容回答。
-    不允许使用模型自身的通用知识补充、推测或编造答案。
+2. search_knowledge 返回的内容是当前知识库提供的唯一事实来源。
 
-    4. 如果 search_knowledge 返回的内容中没有足够的信息，
-    必须明确告诉用户：
-    “知识库中没有相关信息”。
+3. 对于知识库问题，只能根据 search_knowledge 返回的内容回答。
+不允许使用模型自身的通用知识补充、推测或编造答案。
 
-    5. 即使你知道某个问题的通用答案，
-    只要这是知识库问答，也不能使用知识库之外的信息。
+4. 如果 search_knowledge 返回的内容中没有足够的信息，
+必须明确告诉用户：
 
-    【计算规则】
-    如果用户需要数学计算，可以调用 calculator。
-    计算结果应直接使用 calculator 返回的结果。
+“知识库中没有相关信息”。
 
-    【多工具规则】
-    如果一个问题需要多个工具，
-    可以按照任务需要分步骤调用工具。
+5. 即使你知道某个问题的通用答案，
+只要这是知识库问答，也不能使用知识库之外的信息。
 
-    当工具已经返回足够的信息后，
-    再生成最终回答。
-    """
+【计算规则】
+
+如果用户需要数学计算，可以调用 calculator。
+
+计算结果应直接使用 calculator 返回的结果。
+
+【多工具规则】
+
+如果一个问题需要多个工具，
+可以按照任务需要分步骤调用工具。
+
+当工具已经返回足够的信息后，
+再生成最终回答。
+"""
         }
     ]
 
+    # =========================
+    # 添加历史消息
+    # =========================
+
     if history:
         messages.extend(history)
+
+    # =========================
+    # 添加当前用户问题
+    # =========================
 
     messages.append(
         {
@@ -153,7 +207,10 @@ def agent(
         }
     )
 
-    # 最多允许连续调用 5 轮工具
+    # =========================
+    # Agent Loop
+    # =========================
+
     max_rounds = 5
 
     for round_number in range(max_rounds):
@@ -161,6 +218,10 @@ def agent(
         print(
             f"\n========== Agent 第 {round_number + 1} 轮思考 =========="
         )
+
+        # =========================
+        # 1. 让 LLM 决定下一步
+        # =========================
 
         response = client.chat.completions.create(
             model=LLM_MODEL,
@@ -171,15 +232,25 @@ def agent(
 
         message = response.choices[0].message
 
-        # 如果模型不再调用工具，返回最终答案
+        # =========================
+        # 2. 如果没有工具调用
+        #    说明 Agent 已经可以直接回答
+        # =========================
+
         if not message.tool_calls:
 
             return message.content
 
-        # 保存 Assistant 的工具调用消息
+        # =========================
+        # 3. 保存 Assistant 工具调用消息
+        # =========================
+
         messages.append(message)
 
-        # 执行本轮所有工具调用
+        # =========================
+        # 4. 执行本轮所有工具
+        # =========================
+
         for tool_call in message.tool_calls:
 
             function_name = tool_call.function.name
@@ -188,36 +259,51 @@ def agent(
                 tool_call.function.arguments
             )
 
-            print("\n========== Agent 调用工具 ==========")
-            print(f"工具：{function_name}")
-            print(f"参数：{arguments}")
+            print(
+                "\n========== Agent 调用工具 =========="
+            )
+
+            print(
+                f"工具：{function_name}"
+            )
+
+            print(
+                f"参数：{arguments}"
+            )
+
+            # =========================
+            # 记录工具调用
+            # =========================
+
             if tool_call_log is not None:
-                tool_call_log.append(function_name)
-            if function_name == "search_knowledge":
 
-                results = search_knowledge(
-                    arguments["query"],
-                    model,
-                    index,
-                    chunks
+                tool_call_log.append(
+                    function_name
                 )
 
-                tool_result = "\n\n".join(results)
+            # =========================
+            # 执行工具
+            # =========================
 
-            elif function_name == "calculator":
+            tool_result = execute_tool(
+                function_name,
+                arguments,
+                model,
+                index,
+                chunks
+            )
 
-                tool_result = calculator(
-                    arguments["expression"]
-                )
+            print(
+                "\n========== 工具返回结果 =========="
+            )
 
-            else:
+            print(
+                tool_result
+            )
 
-                tool_result = (
-                    f"未知工具：{function_name}"
-                )
-
-            print("\n========== 工具返回结果 ==========")
-            print(tool_result)
+            # =========================
+            # 5. 把工具结果交给 LLM
+            # =========================
 
             messages.append(
                 {
@@ -227,42 +313,70 @@ def agent(
                 }
             )
 
+    # =========================
+    # 超过最大工具调用轮数
+    # =========================
+
     return "工具调用次数超过限制，暂时无法完成任务。"
+
+
 # =========================
-# 4. 主程序
+# 5. 主程序
 # =========================
 
 def main():
 
-    print("========== AI Agent ==========")
+    print(
+        "========== AI Agent =========="
+    )
 
+    # =========================
     # 加载知识库
+    # =========================
+
     text = load_documents(
         "data/knowledge.txt"
     )
 
+    # =========================
     # 自然段切分
-    chunks = split_by_paragraph(text)
+    # =========================
+
+    chunks = split_by_paragraph(
+        text
+    )
 
     print(
         f"知识库 Chunk 数量：{len(chunks)}"
     )
 
+    # =========================
     # 加载 Embedding 模型
+    # =========================
+
     model = load_embedding_model()
 
+    # =========================
     # 生成 Embedding
+    # =========================
+
     embeddings = create_embeddings(
         model,
         chunks
     )
 
+    # =========================
     # 建立 FAISS 索引
+    # =========================
+
     index = build_index(
         embeddings
     )
 
+    # =========================
     # 创建 DeepSeek 客户端
+    # =========================
+
     client = create_client()
 
     # =========================
@@ -290,8 +404,15 @@ def main():
             "\n========== Agent 最终回答 =========="
         )
 
-        print(answer)
+        print(
+            answer
+        )
 
+
+# =========================
+# 6. 程序入口
+# =========================
 
 if __name__ == "__main__":
+
     main()

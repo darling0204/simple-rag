@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import {
   login,
+  register,
   getKnowledgeBases,
   getConversations,
   getMessages,
@@ -28,7 +29,10 @@ function App() {
   localStorage.getItem("username") || ""
 );
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [loginError, setLoginError] = useState("");
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
 
   // =========================
   // 知识库
@@ -78,6 +82,53 @@ function App() {
   };
 
   // =========================
+  // 注册
+  // =========================
+
+  const handleRegister = async () => {
+    const trimmedUsername = username.trim();
+
+    if (!trimmedUsername || !password) {
+      setLoginError("请输入用户名和密码");
+      return;
+    }
+
+    if (trimmedUsername.length < 3) {
+      setLoginError("用户名至少需要 3 个字符");
+      return;
+    }
+
+    if (password.length < 6) {
+      setLoginError("密码至少需要 6 个字符");
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setLoginError("两次输入的密码不一致");
+      return;
+    }
+
+    try {
+      setLoginError("");
+      setIsSubmittingAuth(true);
+
+      await register(trimmedUsername, password);
+
+      setIsRegisterMode(false);
+      setConfirmPassword("");
+      setPassword("");
+      setLoginError("注册成功，请使用新账号登录");
+    } catch (error) {
+      console.error("注册失败：", error);
+      setLoginError(
+        error instanceof Error ? error.message : "注册失败，请检查后端服务"
+      );
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  // =========================
   // 登录后加载知识库
   // =========================
 
@@ -105,8 +156,6 @@ function App() {
 ) => {
 
   console.log("点击了知识库，ID =", knowledgeBaseId);
-
-  alert("点击成功，知识库ID：" + knowledgeBaseId);
 
   setSelectedKnowledgeBaseId(knowledgeBaseId);
 
@@ -413,7 +462,9 @@ const handleLogout = () => {
   // 清空登录表单
   setUsername("");
   setPassword("");
+  setConfirmPassword("");
   setLoginError("");
+  setIsRegisterMode(false);
 };
 
   // =========================
@@ -483,43 +534,118 @@ const handleLogout = () => {
 
   if (!isLoggedIn) {
     return (
-      <div className="login-page">
-        <div className="login-card">
+      <div className="auth-page">
+        <div className="auth-decoration auth-decoration-one" />
+        <div className="auth-decoration auth-decoration-two" />
 
-          <h1>AI Agent</h1>
-
-          <p className="login-subtitle">
-            登录你的 AI Agent 平台
-          </p>
-
-          <input
-            type="text"
-            placeholder="用户名"
-            value={username}
-            onChange={(e) =>
-              setUsername(e.target.value)
-            }
-          />
-
-          <input
-            type="password"
-            placeholder="密码"
-            value={password}
-            onChange={(e) =>
-              setPassword(e.target.value)
-            }
-          />
-
-          {loginError && (
-            <div className="login-error">
-              {loginError}
+        <div className="auth-card">
+          <div className="auth-brand">
+            <div className="brand-mark">N</div>
+            <div>
+              <div className="brand-name">Nova Agent</div>
+              <div className="brand-caption">Enterprise AI Workspace</div>
             </div>
-          )}
+          </div>
 
-          <button onClick={handleLogin}>
-            登录
-          </button>
+          <div className="auth-heading">
+            <h1>{isRegisterMode ? "创建账号" : "欢迎回来"}</h1>
+            <p>
+              {isRegisterMode
+                ? "创建你的 AI Agent 工作空间"
+                : "登录你的 AI Agent 工作空间"}
+            </p>
+          </div>
 
+          <div className="auth-form">
+            <label>用户名</label>
+            <input
+              type="text"
+              placeholder="请输入用户名"
+              value={username}
+              onChange={(e) => {
+                setUsername(e.target.value);
+                setLoginError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isRegisterMode) {
+                  handleLogin();
+                }
+              }}
+            />
+
+            <label>密码</label>
+            <input
+              type="password"
+              placeholder={isRegisterMode ? "至少 6 位密码" : "请输入密码"}
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setLoginError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isRegisterMode) {
+                  handleLogin();
+                }
+              }}
+            />
+
+            {isRegisterMode && (
+              <>
+                <label>确认密码</label>
+                <input
+                  type="password"
+                  placeholder="再次输入密码"
+                  value={confirmPassword}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    setLoginError("");
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      handleRegister();
+                    }
+                  }}
+                />
+              </>
+            )}
+
+            {loginError && (
+              <div className="auth-message">
+                {loginError}
+              </div>
+            )}
+
+            <button
+              className="auth-submit"
+              onClick={isRegisterMode ? handleRegister : handleLogin}
+              disabled={isSubmittingAuth}
+            >
+              {isSubmittingAuth
+                ? "处理中..."
+                : isRegisterMode
+                  ? "创建账号"
+                  : "登录"}
+            </button>
+          </div>
+
+          <div className="auth-switch">
+            {isRegisterMode ? "已经有账号？" : "还没有账号？"}
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(!isRegisterMode);
+                setPassword("");
+                setConfirmPassword("");
+                setLoginError("");
+              }}
+            >
+              {isRegisterMode ? "返回登录" : "立即注册"}
+            </button>
+          </div>
+
+          <div className="auth-footer">
+            RAG · Tool Calling · AI Agent
+          </div>
         </div>
       </div>
     );
@@ -539,7 +665,11 @@ const handleLogout = () => {
       <aside className="sidebar">
 
         <div className="logo">
-          AI Agent
+          <div className="logo-mark">N</div>
+          <div>
+            <div className="logo-title">Nova Agent</div>
+            <div className="logo-subtitle">AI Workspace</div>
+          </div>
         </div>
 
         {/* 知识库区域 */}
@@ -687,14 +817,13 @@ const handleLogout = () => {
 </div>
   <div>
 
-    <h1>
-      AI Agent
-    </h1>
+    <h1>AI Agent</h1>
 
-    <span>
+    <span className="header-context">
+      <span className="status-dot" />
       {selectedKnowledgeBaseId
-        ? "当前已选择知识库"
-        : "请选择一个知识库"}
+        ? "知识库已连接"
+        : "请选择一个知识库"} 
     </span>
 
   </div>
@@ -724,13 +853,19 @@ const handleLogout = () => {
             <div className="welcome-message">
 
               <h2>
-                欢迎使用 AI Agent
+                你好，我是 Nova Agent
               </h2>
 
               <p>
-                你可以向知识库提问，
-                Agent 会根据问题自动检索相关知识。
+                选择一个知识库并开始对话。
+                Agent 会根据知识库内容进行检索和回答。
               </p>
+
+              <div className="welcome-hints">
+                <span>⌘ RAG 检索</span>
+                <span>⌘ Tool Calling</span>
+                <span>⌘ 多轮对话</span>
+              </div>
 
             </div>
           )}
@@ -764,7 +899,11 @@ const handleLogout = () => {
               }
             />
 
-            <button onClick={handleSendMessage}>
+            <button
+              className="send-button"
+              onClick={handleSendMessage}
+              disabled={!messageInput.trim()}
+            >
               发送
             </button>
 
