@@ -1,5 +1,6 @@
 # Simple RAG Agent
 ## 项目演示
+http://134.175.20.148/
 
 ### 登录界面
 
@@ -172,3 +173,52 @@ User
 * 查询文档
 * 删除文档
 
+### 6. 服务器部署与运行
+
+项目已部署至腾讯云 Linux 服务器，实现前后端分离应用的公网访问。
+
+服务器部署架构：
+
+用户浏览器
+    ↓
+腾讯云公网 IP
+    ↓
+Nginx :80
+    ↓
+React 前端
+    ↓
+FastAPI :8000
+    ↓
+RAG Agent
+    ↓
+FAISS / DeepSeek
+
+服务器环境：
+
+操作系统：Ubuntu
+Python：3.12
+Node.js：20
+前端：React + TypeScript + Vite
+后端：FastAPI + Uvicorn
+Web 服务：Nginx
+进程管理：systemd
+数据库：SQLite
+
+部署后的访问流程：
+手机 / 电脑浏览器
+        ↓
+http://134.175.20.148/
+        ↓
+Nginx
+        ↓
+React 前端
+        ↓
+FastAPI API
+        ↓
+JWT 用户认证
+        ↓
+知识库 / 会话 / Agent
+        ↓
+DeepSeek + FAISS
+
+通过服务器部署后，项目具备基本的 SaaS 应用运行能力，可以通过公网访问并完成用户登录、知识库管理、文档上传以及 AI 对话等功能。
