@@ -178,7 +178,7 @@ User
 项目已部署至腾讯云 Linux 服务器，实现前后端分离应用的公网访问。
 
 服务器部署架构：
-
+```text
 用户浏览器
     ↓
 腾讯云公网 IP
@@ -192,7 +192,7 @@ FastAPI :8000
 RAG Agent
     ↓
 FAISS / DeepSeek
-
+```
 服务器环境：
 ```text
 操作系统：Ubuntu
