@@ -1,13 +1,15 @@
 # Simple RAG Agent
 ## 项目演示
 
+### 登录界面
+
+![登录界面](docs/login.png)
+
 ### AI 对话
 
 ![AI 对话界面](docs/chat.png)
 
-### 知识库管理
 
-![知识库管理](docs/knowledge-base.png)
 > 基于 FastAPI + React + FAISS + DeepSeek 实现的轻量级 RAG Agent 智能问答系统
 
 ## 项目简介
