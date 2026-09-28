@@ -194,7 +194,7 @@ RAG Agent
 FAISS / DeepSeek
 
 服务器环境：
-
+```text
 操作系统：Ubuntu
 Python：3.12
 Node.js：20
@@ -203,8 +203,9 @@ Node.js：20
 Web 服务：Nginx
 进程管理：systemd
 数据库：SQLite
-
+```
 部署后的访问流程：
+```text
 手机 / 电脑浏览器
         ↓
 http://134.175.20.148/
@@ -220,5 +221,5 @@ JWT 用户认证
 知识库 / 会话 / Agent
         ↓
 DeepSeek + FAISS
-
+```
 通过服务器部署后，项目具备基本的 SaaS 应用运行能力，可以通过公网访问并完成用户登录、知识库管理、文档上传以及 AI 对话等功能。
