@@ -56,11 +56,11 @@ def load_knowledge_base():
     # 这里直接使用你项目现有的加载函数
     from rag import load_knowledge_base_index
 
-    model, index, chunks = load_knowledge_base_index(
+    model, index, chunks, sources = load_knowledge_base_index(
         KNOWLEDGE_BASE_ID
     )
 
-    return model, index, chunks
+    return model, index, chunks, sources
 
 
 # =========================
@@ -100,7 +100,7 @@ def main():
     # 2. 加载知识库
     print("\n正在加载知识库...")
 
-    model, index, chunks = load_knowledge_base()
+    model, index, chunks, sources = load_knowledge_base()
 
     print(
         f"知识库加载成功，Chunk 数量：{len(chunks)}"

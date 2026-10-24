@@ -1,192 +1,194 @@
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from passlib.context import CryptContext
-from jose import jwt
-from datetime import datetime, timedelta
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from rag import load_knowledge_base_index
+"""Nova Agent API：RAG + Agent + 用户体系的企业级后端。"""
+
+import atexit
+import json
+import logging
 import os
+import time
 import uuid
-from database import (
-    get_db,
-    User,
-    KnowledgeBase,
-    Conversation,
-    Message,
-    Document
-)
+import atexit
+from datetime import datetime, timezone
 
-from rag import save_knowledge_base_index
-
-from rag import (
-    load_documents,
-    split_by_paragraph,
-    load_embedding_model,
-    create_embeddings,
-    build_index,
-)
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
 from agent import (
-    create_client,
+    AgentError,
     agent,
+    agent_stream,
+    create_client,
+    run_coding_agent,
+)
+from config import settings
+from database import (
+    AuditLog,
+    Conversation,
+    Document,
+    KnowledgeBase,
+    Message,
+    SessionLocal,
+    User,
+    get_db,
+    run_migrations,
+    utcnow,
+)
+from indexing import is_rebuilding, schedule_rebuild
+from logging_config import setup_logging
+from middleware import RequestContextMiddleware, unhandled_exception_handler
+from rag import (
+    get_default_knowledge,
+    remove_knowledge_base_index,
+    knowledge_base_index_exists,
+    load_knowledge_base_index,
+)
+from schemas import (
+    ChatRequest,
+    CodingAgentRequest,
+    ConversationCreate,
+    KnowledgeBaseCreate,
+    LoginRequest,
+    RefreshTokenRequest,
+    UserCreate,
+)
+from security import (
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    get_current_admin,
+    get_current_user,
+    hash_password,
+    rate_limit,
+    verify_password,
 )
 
 
 # =========================
-# FastAPI
+# 初始化
 # =========================
+
+setup_logging()
+logger = logging.getLogger("nova.api")
+
+run_migrations()
 
 app = FastAPI(
-    title="AI Agent SaaS API",
-    description="RAG + Tool Calling + Agent + SaaS",
-    version="1.0.0"
+    title=settings.APP_NAME,
+    description="企业级 RAG + Agent 智能问答平台",
+    version=settings.APP_VERSION,
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
+
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://134.175.20.148",       # 允许你的公网 IP 访问
-        "http://localhost:5173",       # 保留本地测试
-        "http://127.0.0.1:5173",
-        "*"                             # 或者直接设为 "*" 允许所有来源（测试阶段最方便）
-    ],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
-# =========================
-# 密码加密
-# =========================
-
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto"
-)
-
-# =========================
-# JWT 配置
-# =========================
-SECRET_KEY = "simple-rag-secret-key"
-ALGORITHM = "HS256"
-
-# Access Token 有效期：60分钟
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
-# Refresh Token 有效期：7天
-REFRESH_TOKEN_EXPIRE_DAYS = 7
-security = HTTPBearer()
+_client = None
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
+def get_client():
+    """DeepSeek 客户端懒加载单例。"""
+    global _client
+    if _client is None:
+        _client = create_client()
+    return _client
+
+
+def write_audit(
+    db: Session,
+    user_id,
+    action: str,
+    detail: str = "",
+    request: Request = None,
 ):
-    token = credentials.credentials
+    ip = ""
+    if request is not None and request.client is not None:
+        ip = request.client.host or ""
+    db.add(
+        AuditLog(
+            user_id=user_id,
+            action=action,
+            detail=detail[:500],
+            ip_address=ip,
+        )
+    )
+    db.commit()
 
+
+def _kb_dict(kb: KnowledgeBase):
+    return {
+        "id": kb.id,
+        "name": kb.name,
+        "description": kb.description or "",
+        "user_id": kb.user_id,
+        "created_at": kb.created_at,
+        "updated_at": kb.updated_at,
+    }
+
+
+def _conversation_dict(conversation: Conversation):
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "user_id": conversation.user_id,
+        "knowledge_base_id": conversation.knowledge_base_id,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+    }
+
+
+def _message_dict(message: Message):
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "sources": json.loads(message.sources or "[]"),
+        "created_at": message.created_at,
+    }
+
+
+def _document_dict(document: Document):
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "size": document.size,
+        "chunk_count": document.chunk_count,
+        "status": document.status,
+        "error_message": document.error_message,
+        "created_at": document.created_at,
+    }
+
+
+def get_user_knowledge_base(
+    knowledge_base_id: int, user: User, db: Session
+) -> KnowledgeBase:
+    """获取属于当前用户的知识库，不存在则 404。"""
+    knowledge_base = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == knowledge_base_id,
+        KnowledgeBase.user_id == user.id,
+    ).first()
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    return knowledge_base
+
+
+def _load_kb_or_503(knowledge_base_id: int):
+    """加载知识库索引；未就绪时返回 503。"""
     try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
-        )
-
-        token_type = payload.get("type")
-
-        if token_type != "access":
-            raise HTTPException(
-                status_code=401,
-                detail="无效的 Access Token"
-            )
-        user_id = payload.get("sub")
-
-        if user_id is None:
-            raise HTTPException(
-                status_code=401,
-                detail="Token 中没有用户信息"
-            )
-
-        user = db.query(User).filter(
-            User.id == int(user_id)
-        ).first()
-
-        if not user:
-            raise HTTPException(
-                status_code=401,
-                detail="用户不存在"
-            )
-
-        return user
-
-    except Exception as e:
-        print("JWT 验证错误：", e)
+        return load_knowledge_base_index(knowledge_base_id)
+    except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=401,
-            detail=f"Token 验证失败：{str(e)}"
-        )
-# =========================
-# 初始化 AI Agent
-# =========================
-
-print("正在加载知识库...")
-
-text = load_documents("data/knowledge.txt")
-
-chunks = split_by_paragraph(text)
-
-print(f"知识库 Chunk 数量：{len(chunks)}")
-
-print("正在加载 Embedding 模型...")
-
-model = load_embedding_model()
-
-print("正在生成 Embedding...")
-
-embeddings = create_embeddings(model, chunks)
-
-print("正在建立 FAISS 索引...")
-
-index = build_index(embeddings)
-
-print("正在创建 DeepSeek 客户端...")
-
-client = create_client()
-
-print("AI Agent 初始化完成！")
-
-
-# =========================
-# 请求模型
-# =========================
-
-class ChatRequest(BaseModel):
-    message: str
-    conversation_id: int
-    knowledge_base_id: int
-
-
-class UserCreate(BaseModel):
-    username: str
-    password: str
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class RefreshTokenRequest(BaseModel):
-    refresh_token: str
-
-class KnowledgeBaseCreate(BaseModel):
-    name: str
-    description: str = ""
-
-
-
-class ConversationCreate(BaseModel):
-    title: str
-    knowledge_base_id: int
-   
+            status_code=503,
+            detail="知识库索引尚未就绪，请稍候或先上传文档",
+        ) from exc
 
 
 # =========================
@@ -194,837 +196,730 @@ class ConversationCreate(BaseModel):
 # =========================
 
 @app.get("/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    db_ok = True
+    try:
+        db.query(User.id).limit(1).all()
+    except Exception:
+        db_ok = False
+
     return {
-        "status": "ok"
+        "status": "ok" if db_ok else "degraded",
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+        "components": {
+            "database": "ok" if db_ok else "error",
+            "llm": (
+                "configured" if settings.DEEPSEEK_API_KEY else "missing_key"
+            ),
+            "embedding_model": (
+                "loaded" if _embedding_loaded() else "lazy",
+            ),
+        },
+        "time": datetime.now(timezone.utc).isoformat(),
     }
 
 
-# =========================
-# AI 对话
-# =========================
+def _embedding_loaded() -> bool:
+    from rag import embedding_model_loaded
 
-@app.post("/chat")
-def chat(
-    request: ChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-
-
-    # 查询会话
-    conversation = db.query(Conversation).filter(
-    Conversation.id == request.conversation_id,
-    Conversation.user_id == current_user.id,
-    Conversation.knowledge_base_id == request.knowledge_base_id
-).first()
-
-    if not conversation:
-        return {
-            "error": "会话不存在，或者该会话不属于当前用户"
-        }
-    knowledge_base = db.query(KnowledgeBase).filter(
-        KnowledgeBase.id == request.knowledge_base_id,
-        KnowledgeBase.user_id == current_user.id
-    ).first()
-
-    if not knowledge_base:
-        return {
-            "error": "知识库不存在，或者该知识库不属于当前用户"
-        }
-
-    try:
-        kb_model, kb_index, kb_chunks = load_knowledge_base_index(
-            request.knowledge_base_id
-        )
-    except FileNotFoundError as e:
-        return {
-            "error": str(e)
-        }
-
-    history_messages = db.query(Message).filter(
-        Message.conversation_id == conversation.id
-    ).order_by(
-        Message.id.desc()
-    ).limit(10).all()
-
-    history_messages.reverse()
-
-    history = []
-
-    for message in history_messages:
-        history.append({
-            "role": message.role,
-            "content": message.content
-        })
-
-
-    # 调用 Agent
-    answer = agent(
-    client,
-    request.message,
-    kb_model,
-    kb_index,
-    kb_chunks,
-    history
-)
-
-    # 保存用户消息
-    user_message = Message(
-        role="user",
-        content=request.message,
-        conversation_id=conversation.id
-    )
-
-    db.add(user_message)
-
-    # 保存 AI 消息
-    assistant_message = Message(
-        role="assistant",
-        content=answer,
-        conversation_id=conversation.id
-    )
-
-    db.add(assistant_message)
-
-    # 提交数据库
-    db.commit()
-
-    return {
-    "user_id": current_user.id,
-    "conversation_id": conversation.id,
-    "message": request.message,
-    "answer": answer
-}
+    return embedding_model_loaded()
 
 
 # =========================
-# 用户注册
+# 用户认证
 # =========================
 
-@app.post("/register")
+@app.post("/register", dependencies=[Depends(rate_limit)])
 def register(
     request: UserCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    # 基础校验
-    username = request.username.strip()
-    password = request.password
-
-    if len(username) < 3:
-        raise HTTPException(
-            status_code=400,
-            detail="用户名至少需要 3 个字符"
-        )
-
-    if len(password) < 6:
-        raise HTTPException(
-            status_code=400,
-            detail="密码至少需要 6 个字符"
-        )
-
-    # 检查用户名是否已经存在
-    existing_user = db.query(User).filter(
-        User.username == username
+    existing = db.query(User).filter(
+        User.username == request.username
     ).first()
-
-    if existing_user:
-        raise HTTPException(
-            status_code=409,
-            detail="用户名已存在"
-        )
-
-    # 密码哈希后再保存
-    hashed_password = pwd_context.hash(password)
+    if existing:
+        raise HTTPException(status_code=409, detail="用户名已存在")
 
     user = User(
-        username=username,
-        password=hashed_password
+        username=request.username,
+        password=hash_password(request.password),
     )
-
     db.add(user)
-
     try:
         db.commit()
         db.refresh(user)
     except Exception:
         db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="注册失败，请稍后重试"
-        )
+        raise HTTPException(status_code=500, detail="注册失败，请稍后重试")
 
+    write_audit(db, user.id, "register")
     return {
         "id": user.id,
         "username": user.username,
-        "message": "注册成功"
+        "message": "注册成功",
     }
 
 
-# =========================
-# 创建用户
-# =========================
-
-@app.post("/users")
-def create_user(
-    request: UserCreate,
-    db: Session = Depends(get_db)
-):
-
-    hashed_password = pwd_context.hash(
-        request.password
-    )
-
-    user = User(
-        username=request.username,
-        password=hashed_password
-    )
-
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    return {
-        "id": user.id,
-        "username": user.username
-    }
-
-# =========================
-# 用户登录
-# =========================
-
-@app.post("/login")
+@app.post("/login", dependencies=[Depends(rate_limit)])
 def login(
     request: LoginRequest,
-    db: Session = Depends(get_db)
+    http_request: Request,
+    db: Session = Depends(get_db),
 ):
-
-    # 查询用户
     user = db.query(User).filter(
-        User.username == request.username
+        User.username == request.username.strip()
     ).first()
 
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="用户名或密码错误"
-        )
+    if not user or not verify_password(request.password, user.password):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-    # 验证密码
-    if not pwd_context.verify(
-        request.password,
-        user.password
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="用户名或密码错误"
-        )
+    access_token, access_expire = create_access_token(user)
+    refresh_token, _ = create_refresh_token(user)
 
-    # =========================
-    # 创建 Access Token
-    # =========================
-
-    access_expire = datetime.utcnow() + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-
-    access_payload = {
-        "sub": str(user.id),
-        "username": user.username,
-        "exp": access_expire,
-        "type": "access"
-    }
-
-    access_token = jwt.encode(
-        access_payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
-
-    # =========================
-    # 创建 Refresh Token
-    # =========================
-
-    refresh_expire = datetime.utcnow() + timedelta(
-        days=REFRESH_TOKEN_EXPIRE_DAYS
-    )
-
-    refresh_payload = {
-        "sub": str(user.id),
-        "username": user.username,
-        "exp": refresh_expire,
-        "type": "refresh"
-    }
-
-    refresh_token = jwt.encode(
-        refresh_payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
+    write_audit(db, user.id, "login", request=http_request)
 
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user_id": user.id
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "is_admin": user.is_admin,
+        },
     }
 
 
-# =========================
-# 刷新 Access Token
-# =========================
-
-@app.post("/refresh")
+@app.post("/refresh", dependencies=[Depends(rate_limit)])
 def refresh_access_token(
     request: RefreshTokenRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
+    payload = decode_token(request.refresh_token, "refresh")
 
     try:
-        payload = jwt.decode(
-            request.refresh_token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
-        )
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Refresh Token 无效")
 
-        # 必须是 Refresh Token
-        if payload.get("type") != "refresh":
-            raise HTTPException(
-                status_code=401,
-                detail="无效的 Refresh Token"
-            )
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="用户不存在")
 
-        user_id = payload.get("sub")
-
-        if user_id is None:
-            raise HTTPException(
-                status_code=401,
-                detail="Refresh Token 中没有用户信息"
-            )
-
-        # 查询用户
-        user = db.query(User).filter(
-            User.id == int(user_id)
-        ).first()
-
-        if not user:
-            raise HTTPException(
-                status_code=401,
-                detail="用户不存在"
-            )
-
-        # 创建新的 Access Token
-        access_expire = datetime.utcnow() + timedelta(
-            minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-        )
-
-        access_payload = {
-            "sub": str(user.id),
-            "username": user.username,
-            "exp": access_expire,
-            "type": "access"
-        }
-
-        access_token = jwt.encode(
-            access_payload,
-            SECRET_KEY,
-            algorithm=ALGORITHM
-        )
-
-        return {
-            "access_token": access_token,
-            "token_type": "bearer"
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        print("Refresh Token 验证错误：", e)
-
-        raise HTTPException(
-            status_code=401,
-            detail="Refresh Token 已过期或无效"
-        )
-
-
-    # =========================
-    # 创建 Access Token
-    # =========================
-
-    access_expire = datetime.utcnow() + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-
-    access_payload = {
-        "sub": str(user.id),
-        "username": user.username,
-        "exp": access_expire,
-        "type": "access"
-    }
-
-    access_token = jwt.encode(
-        access_payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
-
-    # =========================
-    # 创建 Refresh Token
-    # =========================
-
-    refresh_expire = datetime.utcnow() + timedelta(
-        days=REFRESH_TOKEN_EXPIRE_DAYS
-    )
-
-    refresh_payload = {
-        "sub": str(user.id),
-        "username": user.username,
-        "exp": refresh_expire,
-        "type": "refresh"
-    }
-
-    refresh_token = jwt.encode(
-        refresh_payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
-
-    # 返回两个 Token
+    access_token, access_expire = create_access_token(user)
     return {
         "access_token": access_token,
-        "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user_id": user.id
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     }
+
+
+@app.get("/users/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "is_admin": current_user.is_admin,
+        "created_at": current_user.created_at,
+    }
+
+
 # =========================
-# 创建知识库
+# 知识库管理
 # =========================
 
-@app.post("/knowledge-bases")
+@app.post(
+    "/knowledge-bases",
+    dependencies=[Depends(rate_limit)],
+)
 def create_knowledge_base(
     request: KnowledgeBaseCreate,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-
     knowledge_base = KnowledgeBase(
-    name=request.name,
-    description=request.description,
-    user_id=current_user.id
-)
-
+        name=request.name,
+        description=request.description,
+        user_id=current_user.id,
+    )
     db.add(knowledge_base)
     db.commit()
     db.refresh(knowledge_base)
+    return _kb_dict(knowledge_base)
 
-    return {
-        "id": knowledge_base.id,
-        "name": knowledge_base.name,
-        "description": knowledge_base.description,
-        "user_id": knowledge_base.user_id
-    }
 
 @app.get("/knowledge-bases")
 def get_knowledge_bases(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     knowledge_bases = db.query(KnowledgeBase).filter(
         KnowledgeBase.user_id == current_user.id
-    ).order_by(
-        KnowledgeBase.id.desc()
-    ).all()
+    ).order_by(KnowledgeBase.id.desc()).all()
+    return [_kb_dict(kb) for kb in knowledge_bases]
 
-    return [
-        {
-            "id": knowledge_base.id,
-            "name": knowledge_base.name,
-            "description": knowledge_base.description,
-            "user_id": knowledge_base.user_id
-        }
-        for knowledge_base in knowledge_bases
-    ]
 
 @app.delete("/knowledge-bases/{knowledge_base_id}")
 def delete_knowledge_base(
     knowledge_base_id: int,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    # 1. 检查知识库是否属于当前用户
-    knowledge_base = db.query(KnowledgeBase).filter(
-        KnowledgeBase.id == knowledge_base_id,
-        KnowledgeBase.user_id == current_user.id
-    ).first()
+    knowledge_base = get_user_knowledge_base(
+        knowledge_base_id, current_user, db
+    )
 
-    if not knowledge_base:
-        raise HTTPException(
-            status_code=404,
-            detail="知识库不存在"
-        )
-
-    # 2. 先查询这个知识库下的所有文档
     documents = db.query(Document).filter(
         Document.knowledge_base_id == knowledge_base_id
     ).all()
-
-    # 3. 删除实际上传的文件
     for document in documents:
         if document.file_path and os.path.exists(document.file_path):
-            os.remove(document.file_path)
+            try:
+                os.remove(document.file_path)
+            except OSError:
+                logger.warning("删除文档文件失败：%s", document.file_path)
 
-    # 4. 删除数据库中的文档记录
-    db.query(Document).filter(
-        Document.knowledge_base_id == knowledge_base_id
-    ).delete()
-
-    # 5. 删除知识库
+    # ORM 级联删除文档、会话与消息
     db.delete(knowledge_base)
-
-    # 6. 提交数据库
     db.commit()
 
-    # 7. 删除 FAISS 索引文件
-    index_path = f"indexes/kb_{knowledge_base_id}.index"
-    chunks_path = f"indexes/kb_{knowledge_base_id}_chunks.json"
-
-    if os.path.exists(index_path):
-        os.remove(index_path)
-
-    if os.path.exists(chunks_path):
-        os.remove(chunks_path)
+    remove_knowledge_base_index(knowledge_base_id)
+    write_audit(
+        db,
+        current_user.id,
+        "delete_knowledge_base",
+        f"kb_id={knowledge_base_id}",
+        request=http_request,
+    )
 
     return {
         "message": "知识库删除成功",
-        "knowledge_base_id": knowledge_base_id
+        "knowledge_base_id": knowledge_base_id,
     }
+
+
+@app.get("/knowledge-bases/{knowledge_base_id}/index-status")
+def knowledge_base_index_status(
+    knowledge_base_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_user_knowledge_base(knowledge_base_id, current_user, db)
+
+    documents = db.query(Document).filter(
+        Document.knowledge_base_id == knowledge_base_id
+    ).order_by(Document.id.desc()).all()
+
+    pending = [
+        d for d in documents if d.status in {"pending", "indexing"}
+    ]
+
+    return {
+        "knowledge_base_id": knowledge_base_id,
+        "rebuilding": is_rebuilding(knowledge_base_id),
+        "index_exists": knowledge_base_index_exists(knowledge_base_id),
+        "ready": not pending and (
+            not documents or knowledge_base_index_exists(knowledge_base_id)
+        ),
+        "documents": [_document_dict(d) for d in documents],
+    }
+
+
 # =========================
-# 创建对话
+# 文档管理（上传 / 列表 / 删除）
 # =========================
 
-@app.post("/conversations")
+ALLOWED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".csv"}
+
+
+@app.post(
+    "/knowledge-bases/{knowledge_base_id}/documents",
+    dependencies=[Depends(rate_limit)],
+)
+async def upload_document(
+    knowledge_base_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_user_knowledge_base(knowledge_base_id, current_user, db)
+
+    original_name = os.path.basename(file.filename or "").strip()
+    _, extension = os.path.splitext(original_name.lower())
+
+    if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="目前只支持 TXT / Markdown / CSV 文件",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    if len(content) > settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件过大，最大支持 {settings.MAX_UPLOAD_SIZE // 1024 // 1024}MB",
+        )
+
+    kb_dir = os.path.join("uploads", f"kb_{knowledge_base_id}")
+    os.makedirs(kb_dir, exist_ok=True)
+
+    file_path = os.path.join(
+        kb_dir, f"{uuid.uuid4().hex}_{original_name}"
+    )
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    document = Document(
+        filename=original_name,
+        file_path=file_path,
+        size=len(content),
+        status="pending",
+        knowledge_base_id=knowledge_base_id,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    schedule_rebuild(knowledge_base_id)
+
+    return {
+        **_document_dict(document),
+        "message": "文件上传成功，正在后台建立索引",
+    }
+
+
+@app.get("/knowledge-bases/{knowledge_base_id}/documents")
+def get_documents(
+    knowledge_base_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_user_knowledge_base(knowledge_base_id, current_user, db)
+
+    documents = db.query(Document).filter(
+        Document.knowledge_base_id == knowledge_base_id
+    ).order_by(Document.id.desc()).all()
+
+    return [_document_dict(d) for d in documents]
+
+
+@app.delete(
+    "/knowledge-bases/{knowledge_base_id}/documents/{document_id}"
+)
+def delete_document(
+    knowledge_base_id: int,
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_user_knowledge_base(knowledge_base_id, current_user, db)
+
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.knowledge_base_id == knowledge_base_id,
+    ).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    if document.file_path and os.path.exists(document.file_path):
+        os.remove(document.file_path)
+
+    db.delete(document)
+    db.commit()
+
+    schedule_rebuild(knowledge_base_id)
+
+    return {"message": "文档删除成功", "document_id": document_id}
+
+
+# =========================
+# 会话管理
+# =========================
+
+@app.post("/conversations", dependencies=[Depends(rate_limit)])
 def create_conversation(
     request: ConversationCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
 ):
-    knowledge_base = db.query(KnowledgeBase).filter(
-        KnowledgeBase.id == request.knowledge_base_id,
-        KnowledgeBase.user_id == current_user.id
-    ).first()
-
-    if not knowledge_base:
-        raise HTTPException(
-            status_code=404,
-            detail="知识库不存在"
-        )
+    get_user_knowledge_base(request.knowledge_base_id, current_user, db)
 
     conversation = Conversation(
         title=request.title,
         user_id=current_user.id,
-        knowledge_base_id=request.knowledge_base_id
+        knowledge_base_id=request.knowledge_base_id,
     )
-
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
+    return _conversation_dict(conversation)
 
-    return {
-        "id": conversation.id,
-        "title": conversation.title,
-        "user_id": conversation.user_id,
-        "knowledge_base_id": conversation.knowledge_base_id
-    }
 
 @app.get("/conversations")
 def get_conversations(
     knowledge_base_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
+    get_user_knowledge_base(knowledge_base_id, current_user, db)
+
     conversations = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
-        Conversation.knowledge_base_id == knowledge_base_id
-    ).order_by(
-        Conversation.id.desc()
-    ).all()
+        Conversation.knowledge_base_id == knowledge_base_id,
+    ).order_by(Conversation.id.desc()).all()
 
-    return [
-        {
-            "id": conversation.id,
-            "title": conversation.title,
-            "user_id": conversation.user_id,
-            "knowledge_base_id": conversation.knowledge_base_id
-        }
-        for conversation in conversations
-    ]
-
+    return [_conversation_dict(c) for c in conversations]
 
 
 @app.get("/conversations/{conversation_id}/messages")
 def get_conversation_messages(
     conversation_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
 ):
-    # 1. 检查会话是否属于当前用户
     conversation = db.query(Conversation).filter(
         Conversation.id == conversation_id,
-        Conversation.user_id == current_user.id
+        Conversation.user_id == current_user.id,
     ).first()
-
     if not conversation:
-        raise HTTPException(
-            status_code=404,
-            detail="会话不存在"
-        )
+        raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 2. 查询这个会话的所有消息
+    total = db.query(Message).filter(
+        Message.conversation_id == conversation_id
+    ).count()
+
     messages = db.query(Message).filter(
         Message.conversation_id == conversation_id
-    ).order_by(
-        Message.id.asc()
-    ).all()
+    ).order_by(Message.id.asc()).offset(offset).limit(min(limit, 200)).all()
 
-    # 3. 返回消息
-    return [
-        {
-            "id": message.id,
-            "role": message.role,
-            "content": message.content
-        }
-        for message in messages
-    ]
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "messages": [_message_dict(m) for m in messages],
+    }
+
 
 @app.delete("/conversations/{conversation_id}")
 def delete_conversation(
     conversation_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    # 1. 检查会话是否属于当前用户
     conversation = db.query(Conversation).filter(
         Conversation.id == conversation_id,
-        Conversation.user_id == current_user.id
+        Conversation.user_id == current_user.id,
     ).first()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="会话不存在")
 
+    db.delete(conversation)
+    db.commit()
+
+    return {"message": "会话删除成功", "conversation_id": conversation_id}
+
+
+# =========================
+# AI 对话
+# =========================
+
+def _load_chat_context(
+    request: ChatRequest, user: User, db: Session
+):
+    """校验会话与知识库归属，返回 conversation 与历史消息。"""
+    conversation = db.query(Conversation).filter(
+        Conversation.id == request.conversation_id,
+        Conversation.user_id == user.id,
+        Conversation.knowledge_base_id == request.knowledge_base_id,
+    ).first()
     if not conversation:
         raise HTTPException(
-            status_code=404,
-            detail="会话不存在"
+            status_code=404, detail="会话不存在，或该会话不属于当前用户"
         )
 
-    # 2. 删除这个会话下面的所有消息
-    db.query(Message).filter(
-        Message.conversation_id == conversation_id
-    ).delete()
+    get_user_knowledge_base(request.knowledge_base_id, user, db)
 
-    # 3. 删除会话
-    db.delete(conversation)
+    history_rows = db.query(Message).filter(
+        Message.conversation_id == conversation.id
+    ).order_by(Message.id.desc()).limit(settings.HISTORY_MESSAGES).all()
+    history_rows.reverse()
 
-    # 4. 提交数据库
-    db.commit()
+    history = [
+        {"role": message.role, "content": message.content}
+        for message in history_rows
+    ]
 
-    return {
-        "message": "会话删除成功",
-        "conversation_id": conversation_id
-    }
-# =========================
-# 知识库文档管理（上传 / 列表 / 删除）
-# =========================
-
-UPLOAD_DIR = "uploads"
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 单个文件最大 10MB
+    return conversation, history
 
 
-def get_user_knowledge_base(
-    knowledge_base_id: int,
-    current_user: User,
-    db: Session
-):
-    """获取属于当前用户的知识库，不存在则返回 404"""
-    knowledge_base = db.query(KnowledgeBase).filter(
-        KnowledgeBase.id == knowledge_base_id,
-        KnowledgeBase.user_id == current_user.id
-    ).first()
-
-    if not knowledge_base:
-        raise HTTPException(
-            status_code=404,
-            detail="知识库不存在"
-        )
-
-    return knowledge_base
-
-
-def rebuild_knowledge_base_index(knowledge_base_id: int, db: Session):
-    """根据知识库当前所有文档重建 FAISS 索引；没有文档时清理索引文件"""
-    documents = db.query(Document).filter(
-        Document.knowledge_base_id == knowledge_base_id
-    ).all()
-
-    file_paths = [doc.file_path for doc in documents]
-
-    if not file_paths:
-        for path in (
-            f"indexes/kb_{knowledge_base_id}.index",
-            f"indexes/kb_{knowledge_base_id}_chunks.json",
-        ):
-            if os.path.exists(path):
-                os.remove(path)
-        return
-
-    save_knowledge_base_index(
-        knowledge_base_id,
-        file_paths
-    )
-
-
-# ---------- 上传文档 ----------
-
-@app.post("/knowledge-bases/{knowledge_base_id}/documents")
-async def upload_document(
-    knowledge_base_id: int,
-    file: UploadFile = File(...),
+@app.post("/chat", dependencies=[Depends(rate_limit)])
+def chat(
+    request: ChatRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    # 1. 检查知识库是否属于当前用户
-    get_user_knowledge_base(knowledge_base_id, current_user, db)
-
-    # 2. 清理文件名，防止路径穿越；目前只支持 TXT
-    original_name = os.path.basename(file.filename or "")
-
-    if not original_name.lower().endswith(".txt"):
-        raise HTTPException(
-            status_code=400,
-            detail="目前只支持 TXT 文件"
-        )
-
-    # 3. 读取并校验内容
-    content = await file.read()
-
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="文件内容为空"
-        )
-
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="文件过大，最大支持 10MB"
-        )
-
-    # 4. 按知识库分目录，文件名加 UUID 前缀，避免同名覆盖
-    kb_dir = os.path.join(UPLOAD_DIR, f"kb_{knowledge_base_id}")
-    os.makedirs(kb_dir, exist_ok=True)
-
-    file_path = os.path.join(
-        kb_dir,
-        f"{uuid.uuid4().hex}_{original_name}"
+    conversation, history = _load_chat_context(request, current_user, db)
+    kb_model, kb_index, kb_chunks, kb_sources = _load_kb_or_503(
+        request.knowledge_base_id
     )
 
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    # 5. 保存数据库记录
-    document = Document(
-        filename=original_name,
-        file_path=file_path,
-        knowledge_base_id=knowledge_base_id
+    user_message = Message(
+        role="user",
+        content=request.message,
+        conversation_id=conversation.id,
     )
-
-    db.add(document)
+    db.add(user_message)
     db.commit()
-    db.refresh(document)
+    db.refresh(user_message)
 
-    # 6. 重建 FAISS 索引；失败则回滚文档记录和文件
+    tool_call_log = []
+    start = time.perf_counter()
+
     try:
-        rebuild_knowledge_base_index(knowledge_base_id, db)
-    except Exception as e:
-        print("建立索引失败：", e)
-
-        db.delete(document)
-        db.commit()
-
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"文档处理失败：{str(e)}"
+        answer = agent(
+            get_client(),
+            request.message,
+            kb_model,
+            kb_index,
+            kb_chunks,
+            history,
+            tool_call_log=tool_call_log,
+            sources=kb_sources,
         )
+    except AgentError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    assistant_message = Message(
+        role="assistant",
+        content=answer,
+        conversation_id=conversation.id,
+        sources=json.dumps(_extract_sources(tool_call_log), ensure_ascii=False),
+        tool_calls=json.dumps(
+            _strip_tool_log(tool_call_log), ensure_ascii=False
+        ),
+        latency_ms=latency_ms,
+    )
+    db.add(assistant_message)
+    conversation.updated_at = utcnow()
+    db.commit()
+    db.refresh(assistant_message)
 
     return {
-        "id": document.id,
-        "filename": document.filename,
-        "knowledge_base_id": document.knowledge_base_id,
-        "message": "文件上传成功"
+        "conversation_id": conversation.id,
+        "message_id": assistant_message.id,
+        "answer": answer,
+        "sources": json.loads(assistant_message.sources or "[]"),
+        "latency_ms": latency_ms,
     }
 
 
-# ---------- 文档列表 ----------
+def _extract_sources(tool_call_log):
+    from agent import _extract_sources as extract
 
-@app.get("/knowledge-bases/{knowledge_base_id}/documents")
-def get_documents(
-    knowledge_base_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    get_user_knowledge_base(knowledge_base_id, current_user, db)
+    return extract(tool_call_log)
 
-    documents = db.query(Document).filter(
-        Document.knowledge_base_id == knowledge_base_id
-    ).order_by(
-        Document.id.desc()
-    ).all()
 
+def _strip_tool_log(tool_call_log):
     return [
         {
-            "id": document.id,
-            "filename": document.filename,
-            "knowledge_base_id": document.knowledge_base_id
+            "round": step.get("round"),
+            "tool": step.get("tool"),
+            "arguments": step.get("arguments"),
+            "result": str(step.get("result", ""))[:500],
         }
-        for document in documents
+        for step in tool_call_log
     ]
 
 
-# ---------- 删除单个文档 ----------
-
-@app.delete("/knowledge-bases/{knowledge_base_id}/documents/{document_id}")
-def delete_document(
-    knowledge_base_id: int,
-    document_id: int,
+@app.post("/chat/stream", dependencies=[Depends(rate_limit)])
+def chat_stream(
+    request: ChatRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    get_user_knowledge_base(knowledge_base_id, current_user, db)
+    conversation, history = _load_chat_context(request, current_user, db)
 
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.knowledge_base_id == knowledge_base_id
-    ).first()
-
-    if not document:
-        raise HTTPException(
-            status_code=404,
-            detail="文档不存在"
-        )
-
-    # 删除实际文件
-    if document.file_path and os.path.exists(document.file_path):
-        os.remove(document.file_path)
-
-    # 删除数据库记录
-    db.delete(document)
+    user_message = Message(
+        role="user",
+        content=request.message,
+        conversation_id=conversation.id,
+    )
+    db.add(user_message)
     db.commit()
 
-    # 用剩余文档重建索引
-    rebuild_knowledge_base_index(knowledge_base_id, db)
+    knowledge_base_id = request.knowledge_base_id
+    conversation_id = conversation.id
+    user_id = current_user.id
 
-    return {
-        "message": "文档删除成功",
-        "document_id": document_id
-    }
+    def event_generator():
+        stream_db = SessionLocal()
+        try:
+            try:
+                kb_model, kb_index, kb_chunks, kb_sources = (
+                    _load_kb_or_503(knowledge_base_id)
+                )
+            except HTTPException as exc:
+                yield _sse({"type": "error", "message": exc.detail})
+                return
+
+            answer_parts = []
+            sources = []
+            tool_calls = []
+            start = time.perf_counter()
+
+            try:
+                for event in agent_stream(
+                    get_client(),
+                    request.message,
+                    kb_model,
+                    kb_index,
+                    kb_chunks,
+                    history,
+                    sources=kb_sources,
+                ):
+                    if event["type"] == "delta":
+                        answer_parts.append(event["content"])
+                        yield _sse(
+                            {"type": "delta", "content": event["content"]}
+                        )
+                    elif event["type"] == "done":
+                        sources = event.get("sources", [])
+                        tool_calls = event.get("tool_calls", [])
+                    else:
+                        yield _sse(event)
+            except Exception as exc:
+                logger.exception("流式对话失败")
+                yield _sse(
+                    {"type": "error", "message": f"模型调用失败：{exc}"}
+                )
+
+            answer = "".join(answer_parts)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+
+            if answer:
+                assistant_message = Message(
+                    role="assistant",
+                    content=answer,
+                    conversation_id=conversation_id,
+                    sources=json.dumps(sources, ensure_ascii=False),
+                    tool_calls=json.dumps(
+                        _strip_tool_log(tool_calls), ensure_ascii=False
+                    ),
+                    latency_ms=latency_ms,
+                )
+                stream_db.add(assistant_message)
+                conversation_row = stream_db.query(Conversation).filter(
+                    Conversation.id == conversation_id
+                ).first()
+                if conversation_row:
+                    conversation_row.updated_at = utcnow()
+                stream_db.commit()
+
+                yield _sse(
+                    {
+                        "type": "done",
+                        "answer": answer,
+                        "sources": sources,
+                        "latency_ms": latency_ms,
+                    }
+                )
+            else:
+                yield _sse(
+                    {
+                        "type": "done",
+                        "answer": "",
+                        "sources": [],
+                        "latency_ms": latency_ms,
+                    }
+                )
+        finally:
+            stream_db.close()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# =========================
+# Coding Agent（默认关闭，且仅管理员可用）
+# =========================
+
+@app.post("/coding-agent", dependencies=[Depends(rate_limit)])
+def coding_agent(
+    request: CodingAgentRequest,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    if not settings.CODING_AGENT_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Coding Agent 未启用。请在服务端设置 "
+            "CODING_AGENT_ENABLED=true 开启。",
+        )
+
+    model, index, chunks, sources = get_default_knowledge()
+
+    result = run_coding_agent(
+        client=get_client(),
+        task=request.task.strip(),
+        model=model,
+        index=index,
+        chunks=chunks,
+        max_rounds=15,
+    )
+
+    write_audit(
+        db,
+        current_user.id,
+        "coding_agent",
+        request.task.strip()[:200],
+    )
+
+    return result
+
+
+def _cleanup_resources():
+    from database import engine
+    from indexing import shutdown
+
+    try:
+        shutdown()
+    except Exception:
+        pass
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_resources)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "api:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+    )
