@@ -213,7 +213,7 @@ def health(db: Session = Depends(get_db)):
                 "configured" if settings.DEEPSEEK_API_KEY else "missing_key"
             ),
             "embedding_model": (
-                "loaded" if _embedding_loaded() else "lazy",
+                "loaded" if _embedding_loaded() else "lazy"
             ),
         },
         "time": datetime.now(timezone.utc).isoformat(),
