@@ -13,7 +13,6 @@ import re
 import threading
 
 import faiss
-from sentence_transformers import SentenceTransformer
 
 from config import (
     EMBEDDING_MODEL,
@@ -125,6 +124,9 @@ def get_embedding_model():
 
     with _MODEL_LOCK:
         if _EMBEDDING_MODEL is None or _MODEL_NAME_LOADED != EMBEDDING_MODEL:
+            # 懒导入：torch 体积大，避免拖慢服务启动
+            from sentence_transformers import SentenceTransformer
+
             _EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL)
             _MODEL_NAME_LOADED = EMBEDDING_MODEL
         return _EMBEDDING_MODEL
