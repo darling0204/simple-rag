@@ -569,8 +569,14 @@ function App() {
     setMessageInput("");
     setStreaming(true);
 
-    const userMessage: ChatMessage = { role: "user", content };
+    const clientId = `client-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const userMessage: ChatMessage = {
+      clientId,
+      role: "user",
+      content,
+    };
     const assistantMessage: ChatMessage = {
+      clientId: `${clientId}-assistant`,
       role: "assistant",
       content: "",
       streaming: true,
@@ -583,7 +589,9 @@ function App() {
       updater: (message: ChatMessage) => ChatMessage
     ) => {
       setMessages((prev) =>
-        prev.map((item) => (item === assistantMessage ? updater(item) : item))
+        prev.map((item) =>
+          item.clientId === assistantMessage.clientId ? updater(item) : item
+        )
       );
     };
 
@@ -919,7 +927,7 @@ function App() {
 
           {messages.map((message, index) => (
             <div
-              key={message.id ?? index}
+              key={message.clientId ?? message.id ?? index}
               className={
                 message.role === "user"
                   ? "message user-message"

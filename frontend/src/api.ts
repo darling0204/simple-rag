@@ -156,6 +156,7 @@ export interface ConversationItem {
 
 export interface ChatMessage {
   id?: number;
+  clientId?: string;
   role: "user" | "assistant";
   content: string;
   sources?: string[];
