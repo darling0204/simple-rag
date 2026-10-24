@@ -111,6 +111,9 @@ npm run build               # 产物在 frontend/dist
 2. 前端 `npm run build` 后把 `frontend/dist` 交给 Nginx 托管
 3. Nginx 将 `/` 指向前端静态文件，其余接口反代到 `127.0.0.1:8000`：
 
+现成配置见 [deploy/nginx.conf](deploy/nginx.conf)，可直接复制到
+`/etc/nginx/sites-enabled/` 使用。
+
 ```nginx
 server {
     listen 80;
