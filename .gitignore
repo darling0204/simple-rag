@@ -11,6 +11,8 @@ env/
 # Environment variables / secrets
 .env
 .env.*
+!.env.example
+!frontend/.env.example
 
 # Database
 *.db
@@ -25,6 +27,10 @@ indexes/
 
 # Logs
 *.log
+logs/
+
+# 数据库备份
+*.db.bak*
 
 # IDE
 .vscode/
